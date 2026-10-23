@@ -30,8 +30,26 @@ and taken up again.  So here a Holon agent is a session.  While ~holon~ is on ~P
   running Holon terminal.
 
 Holon's daemon is started when an agent is started or resumed and it is not running; it is
-Holon's background service and keeps working after Emacs exits.  Holon takes no MCP servers, so
-it sees nothing of Emacs's state.
+Holon's background service and keeps working after Emacs exits.
+
+* With the other agents
+
+While LispM runs (lispm-agent 0.8.0 or later), a Holon agent open in a terminal works with the
+other agents, LispM's own and other programs' such as Claude Code and Codex, and uses LispM's
+skills and tools:
+
+- What they send it, =[Message from codex]= or =[Request R1 from claude]=, goes to Holon's
+  daemon as a message from its operator.  An agent at work takes it into the turn under way; one
+  at rest starts a turn on it.  Holon's terminal UI shows it as it comes.
+- Holon takes no MCP servers, so its agent reaches LispM with lispm-agent's command
+  =bin/lispm-tool=, run in its shell: ~list_agents~, ~send_message~, ~ask_agent~, ~reply~,
+  ~search_tools~, ~skill~ and ~call_tool~.  The command finds the agent's server by
+  =HOLON_AGENT_ID=, which Holon gives each command of the agent's.  A skill, =lispm=, written
+  into the agent's own skills while its terminal is open, tells it how.
+- A call of a LispM tool that changes things waits for your approval in Emacs, as LispM's own
+  agents' do.
+
+Holon sees nothing else of Emacs's state.
 
 Without ~holon~ on ~PATH~, Holon shows nowhere, and LispM Desktop's App Store greys it out with
 the command installing it.
