@@ -1,0 +1,21 @@
+#!/bin/sh
+# Copyright (C) 2026  Ryan.K
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# A stand-in for holon, for lispm-holon's tests: it writes a log line to
+# stderr, as Holon does, and keeps the arguments of every call in
+# $FAKE_HOLON_DIR/calls, one call a line.  It answers as a Holon with no
+# model does until $FAKE_HOLON_DIR/model is there, and refuses to delete
+# the agent `default', as Holon refuses to delete its default agent.
+dir=${FAKE_HOLON_DIR:?}
+echo "$*" >> "$dir/calls"
+echo "2026-10-23T10:20:47.031296Z  INFO holon::startup: startup phase" >&2
+if [ ! -e "$dir/model" ]; then
+  echo "Error: no default model configured and no authenticated provider with a known model is available; set HOLON_MODEL or model.default, or configure provider credentials" >&2
+  exit 1
+fi
+if [ "$1 $2 $3" = "agent delete default" ]; then
+  echo "Error: /api/control/agents/default returned HTTP 409: the configured default agent cannot be deleted [agent_delete_forbidden]" >&2
+  exit 1
+fi
+echo '{"ok": true}'

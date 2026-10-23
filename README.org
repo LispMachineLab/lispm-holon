@@ -1,0 +1,73 @@
+#+title: LispM Holon
+
+#+HTML: <p align="center"><a href="https://github.com/LispMachineLab/lispm-holon/actions/workflows/test.yml"><img src="https://github.com/LispMachineLab/lispm-holon/actions/workflows/test.yml/badge.svg" alt="test" /></a></p>
+
+[[https://holon.run][Holon]], open-source software that keeps AI agents at work on your own computer, as one of
+the editor's agents of [[https://github.com/LispMachineLab/lispm-agent][LispM Agent]], beside Claude Code and Codex.  It needs lispm-agent
+alone and works in any Emacs 30.1 or later; [[https://github.com/LispMachineLab/lispm-desktop][LispM Desktop]]'s App Store installs it from its
+Extensions.  In code, the prefix is ~lispm-holon-~.
+
+* What it does
+
+Holon keeps agents rather than sessions: each lives in Holon's background service, with a role,
+a memory and work it follows through, and goes on with one conversation however often it is left
+and taken up again.  So here a Holon agent is a session.  While ~holon~ is on ~PATH~:
+
+- =o= in ~lispm-agents-map~ (=C-c a o= in LispM Desktop, where its agents sidebar and λ menu
+  offer it too) makes a Holon agent named after the current project, attaches the project to it
+  as its workspace, and opens Holon's own terminal UI, ~holon tui~, on it.  Outside projects the
+  agent is a chat, named =chat=.  ~lispm-holon-template~ names the Holon template agents are made
+  from; by default, Holon's own coding assistant.
+- Holon's agents join the other agents' sessions in ~lispm-agents-sessions~ (=C-c a s=), grouped
+  by the project each works in, else the one attached to it.  Resuming one opens the terminal UI
+  on that agent.  They are asked of Holon's daemon over its Unix socket,
+  =~/.holon/run/holon.sock= (=$HOLON_HOME/run/holon.sock=), again only when Holon's database
+  changed.
+- Renaming and deleting an agent go through the ~holon~ command; deleting removes all Holon keeps
+  of it, and Holon refuses to delete its default agent.  An agent's transcript is its
+  conversation, what you asked and the briefs it gave back, in Markdown.
+- ~lispm-agents-send-region~ (=C-c a r=) puts the region, with where it is, into the input of a
+  running Holon terminal.
+
+Holon's daemon is started when an agent is started or resumed and it is not running; it is
+Holon's background service and keeps working after Emacs exits.  Holon takes no MCP servers, so
+it sees nothing of Emacs's state.
+
+Without ~holon~ on ~PATH~, Holon shows nowhere, and LispM Desktop's App Store greys it out with
+the command installing it.
+
+* Installation
+
+From LispM Desktop's App Store: Extensions, Holon, Get.  Removing it there takes Holon away from
+the editor at once; its agents stay in Holon.
+
+By hand, from a checkout, with lispm-agent's =lisp/= on the load path:
+
+#+begin_src emacs-lisp
+(add-to-list 'load-path "~/src/lispm-holon")
+(require 'lispm-holon)
+(keymap-global-set "C-c a" lispm-agents-map)
+#+end_src
+
+Holon itself comes from Homebrew or [[https://github.com/holon-run/holon/releases][its releases]]; it needs a model provider before
+it starts an agent, which =M-x lispm-holon-setup= sets up by running ~holon onboard~ in a
+terminal:
+
+#+begin_src sh
+brew tap holon-run/tap && brew install holon
+#+end_src
+
+* Tests
+
+#+begin_src sh
+make test LISPM_AGENT=../lispm-agent/lisp
+#+end_src
+
+They need no Holon: its daemon is a server in the test Emacs, and its command
+=test/fake-holon=.
+
+* License
+
+GNU Affero General Public License, version 3 or later; see [[file:LICENSE][LICENSE]].  The icon is Holon's
+mark, from [[https://github.com/holon-run/holon][holon-run/holon]] (Apache License 2.0).  Holon is developed by its own
+authors; this extension, which connects it to the editor, is LispMachineLab's.
