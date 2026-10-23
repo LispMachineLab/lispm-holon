@@ -7,6 +7,7 @@
 # $FAKE_HOLON_DIR/calls, one call a line.  It answers as a Holon with no
 # model does until $FAKE_HOLON_DIR/model is there, and refuses to delete
 # the agent `default', as Holon refuses to delete its default agent.
+# Its model providers are in $FAKE_HOLON_DIR/providers.json, if there.
 dir=${FAKE_HOLON_DIR:?}
 echo "$*" >> "$dir/calls"
 echo "2026-10-23T10:20:47.031296Z  INFO holon::startup: startup phase" >&2
@@ -17,5 +18,9 @@ fi
 if [ "$1 $2 $3" = "agent delete default" ]; then
   echo "Error: /api/control/agents/default returned HTTP 409: the configured default agent cannot be deleted [agent_delete_forbidden]" >&2
   exit 1
+fi
+if [ "$1 $2 $3" = "config providers list" ]; then
+  cat "$dir/providers.json" 2>/dev/null || echo '[]'
+  exit 0
 fi
 echo '{"ok": true}'
