@@ -483,7 +483,7 @@ its files."
     (should-not (lispm-holon--remember-workspaces '("/src/a")))
     (should (equal (lispm-holon--remember-workspaces '("/src/c" "/src/a")) '("/src/c")))
     (should (equal (lispm-holon--workspaces) '("/src/a" "/src/b" "/src/c")))
-    (should (string-prefix-p user-emacs-directory (lispm-holon--workspaces-file)))))
+    (should (string-prefix-p (expand-file-name user-emacs-directory) (lispm-holon--workspaces-file)))))
 
 (ert-deftest lispm-holon-test-domains ()
   "The domains Holon's daemon may reach are those of its model providers

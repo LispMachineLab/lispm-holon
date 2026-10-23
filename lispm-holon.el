@@ -612,7 +612,7 @@ it again first, so that it may write there."
   "Return the file listing the projects Holon's daemon may write in the
 sandbox.  It lies where Emacs keeps its own files, which sandboxed
 programs may never write."
-  (locate-user-emacs-file "lispm-holon-workspaces.eld"))
+  (expand-file-name (locate-user-emacs-file "lispm-holon-workspaces.eld")))
 
 (defun lispm-holon--workspaces ()
   "Return the projects LispM attached to Holon's agents, which Holon's
