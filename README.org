@@ -36,6 +36,26 @@ it sees nothing of Emacs's state.
 Without ~holon~ on ~PATH~, Holon shows nowhere, and LispM Desktop's App Store greys it out with
 the command installing it.
 
+* In LispM's sandbox
+
+Holon runs its agents' commands as you: its own daemon confines nothing.  With lispm-agent 0.7.0
+or later, Holon's daemon is also a LispM service, ~holon~ (lispm-services.el).  Give it a sandbox
+level, ~(lispm-service-set-level 'holon 'middle t)~, or add it to LispM Desktop's startup items
+(Control Panels, Startup, Add…, Service), and LispM runs ~holon serve~ in its sandbox, srt,
+instead of Holon's own daemon, which it stops first.  Every command of Holon's agents then runs
+there too.
+
+On top of the level's rules, the daemon may:
+
+- read and write Holon's home and the projects LispM attached to its agents (remembered in
+  =~/.emacs.d/lispm-holon-workspaces.eld=), and those of ~lispm-holon-sandbox-allow-write~;
+- bind its socket and its local port, so the terminal UI, the web UI and LispM reach it;
+- reach the model providers Holon has credentials for, and ~lispm-holon-sandbox-domains~.
+
+A project attached later starts the daemon again first, as the sandbox's rules of files hold
+from a start; Holon restores its agents' work as it starts.  A directory an agent attaches by
+itself stays read-only.  The daemon in the sandbox runs while Emacs runs, and stops with it.
+
 * Installation
 
 From LispM Desktop's App Store: Extensions, Holon, Get.  Removing it there takes Holon away from

@@ -58,6 +58,20 @@
 ;;   Markdown.
 ;;
 ;; Holon takes no MCP servers, so it sees nothing of Emacs's state.
+;;
+;; Holon runs its agents' commands as you, with nothing confining them.
+;; Where LispM Agent has services (lispm-services.el), Holon's daemon is
+;; one, `holon': given a sandbox level of its own (`lispm-service-levels',
+;; set where a desktop lists startup items), LispM runs `holon serve' in
+;; the sandbox, and every command of Holon's agents runs there too.  On
+;; top of the level's rules it may write Holon's home and the projects
+;; LispM attached to its agents, bind its socket and local port, and
+;; reach the model providers Holon has credentials for.  It then runs
+;; while Emacs runs, and is started in place of Holon's own daemon,
+;; which is stopped first.  A project attached afterwards starts it
+;; again, as the sandbox's rules of files hold from a start; one an
+;; agent attached by itself stays read-only, unless named in
+;; `lispm-holon-sandbox-allow-write'.
 
 ;;; Code:
 
@@ -67,7 +81,19 @@
 (require 'parse-time)
 (require 'project)
 (require 'url-util)
+(require 'url-parse)
 (require 'lispm-agents)
+;; LispM Agent's services, where it has them: since lispm-agent 0.7.0.
+(require 'lispm-services nil t)
+
+(declare-function lispm-define-service "lispm-services" (id &rest properties))
+(declare-function lispm-undefine-service "lispm-services" (id))
+(declare-function lispm-service-managed-p "lispm-services" (id))
+(declare-function lispm-service-process "lispm-services" (id))
+(declare-function lispm-service-level "lispm-services" (id))
+(declare-function lispm-service-start "lispm-services" (id &optional show))
+(declare-function lispm-service-restart "lispm-services" (id &optional show))
+(declare-function lispm-service-buffer-name "lispm-services" (id))
 
 (defgroup lispm-holon nil
   "Holon, one of the editor's agents."
@@ -79,6 +105,19 @@
 --template' takes it: a template's name or file.  nil makes Holon's own
 default agent, a coding assistant."
   :type '(choice (const :tag "Holon's default" nil) string))
+
+(defcustom lispm-holon-sandbox-allow-write nil
+  "Further places Holon's daemon may write when LispM runs it in the
+sandbox, beside Holon's home and the projects LispM attached to its
+agents.  Changes take effect when it starts again."
+  :type '(repeat directory))
+
+(defcustom lispm-holon-sandbox-domains nil
+  "Further domains Holon's daemon may reach when LispM runs it in the
+sandbox, beside those of the model providers it has credentials for and
+those of the sandbox's level, as for web search.  Entries are srt's:
+example.com, *.example.com or example.com:443."
+  :type '(repeat string))
 
 (defconst lispm-holon-directory
   (file-name-directory (or load-file-name buffer-file-name))
@@ -225,19 +264,32 @@ no model yet, with how to give it one."
             (string-trim (buffer-string))))
       (delete-file errors))))
 
+(defun lispm-holon--managed-p ()
+  "Return non-nil when LispM runs Holon's daemon, as a service in the
+sandbox: when the service `holon' has a level of its own."
+  (and (fboundp 'lispm-service-managed-p) (lispm-service-managed-p 'holon)))
+
 (defun lispm-holon--ensure-daemon ()
   "Start Holon's daemon unless it runs: the agents live in it, and Holon's
-terminal UI talks to it.  It is Holon's background service, and goes on
-after Emacs exits."
-  (unless (lispm-holon--running-p)
-    (message "Starting Holon's daemon...")
-    (lispm-holon--run "daemon" "start")
+terminal UI talks to it.  It is Holon's own background service, going
+on after Emacs exits; or, when LispM runs it, the service `holon', in the
+sandbox, which takes the place of Holon's own if that runs."
+  (let ((managed (lispm-holon--managed-p)))
+    (cond (managed
+           (unless (lispm-service-process 'holon)
+             (message "Starting Holon's daemon in the sandbox...")
+             (lispm-service-start 'holon)))
+          ((not (lispm-holon--running-p))
+           (message "Starting Holon's daemon...")
+           (lispm-holon--run "daemon" "start")))
+    ;; A daemon just started, or starting at LispM's start, answers once
+    ;; it is up.
     (let ((deadline (+ (float-time) lispm-holon-timeout)))
       (while (and (not (lispm-holon--running-p)) (< (float-time) deadline))
         (sleep-for 0.1)))
     (unless (lispm-holon--running-p)
-      (user-error "Holon's daemon did not start; `holon daemon logs' says why"))
-    (message "Starting Holon's daemon...done")))
+      (user-error "Holon's daemon did not start; %s says why"
+                  (if managed (lispm-service-buffer-name 'holon) "`holon daemon logs'")))))
 
 ;;;; Sessions (pure)
 
@@ -257,13 +309,18 @@ or nil: its last turn, or the last brief it gave."
                                                    :completed_at))))))
     (and times (apply #'max times))))
 
+(defun lispm-holon--project-workspaces (state)
+  "Return the workspaces attached to the Holon agent of STATE but its own
+home: its projects."
+  (seq-remove (lambda (workspace)
+                (string-prefix-p "agent_home:" (plist-get workspace :workspace_id)))
+              (plist-get (plist-get state :workspace) :workspaces)))
+
 (defun lispm-holon--directory (state)
   "Return the directory of the project the Holon agent of STATE belongs
 to, or nil: the workspace it works in when that is not its own home, else
 the first attached to it that is not."
-  (let ((workspaces (seq-remove (lambda (workspace)
-                                  (string-prefix-p "agent_home:" (plist-get workspace :workspace_id)))
-                                (plist-get (plist-get state :workspace) :workspaces))))
+  (let ((workspaces (lispm-holon--project-workspaces state)))
     (plist-get (or (seq-find (lambda (workspace) (plist-get workspace :is_active)) workspaces)
                    (car workspaces))
                :workspace_anchor)))
@@ -311,6 +368,13 @@ An agent that has done nothing yet is as old as its home directory."
                  (if (file-exists-p home) (lispm-agents-file-time home) (float-time))))))
           (seq-filter #'lispm-holon--active-p (lispm-holon--ask "GET" "/api/agents/list"))))
 
+(defun lispm-holon--not-running-p (err)
+  "Return non-nil when ERR, signalled connecting to the daemon's socket,
+says that no daemon listens there: a daemon that stopped may leave its
+socket behind."
+  (and (eq (car err) 'file-error)
+       (string-match-p "Connection refused\\|No such file" (error-message-string err))))
+
 (defun lispm-holon-sessions ()
   "Return a session for every Holon agent, asking Holon's daemon again only
 when Holon's database changed.  While the daemon does not run, there are
@@ -322,7 +386,8 @@ none; a daemon that cannot be asked lists none, and says so."
                   (and (car stamp)
                        (condition-case err
                            (lispm-holon--read-sessions)
-                         (error (message "Holon sessions unavailable: %s" (error-message-string err))
+                         (error (unless (lispm-holon--not-running-p err)
+                                  (message "Holon sessions unavailable: %s" (error-message-string err)))
                                 nil))))))
     (cdr lispm-holon--cache)))
 
@@ -511,10 +576,23 @@ New sessions start there, see `lispm-agents-new'."
 \(ID . ARGUMENTS) opening Holon's terminal UI on it.  The agent is named
 after the project, which is attached to it as its workspace; outside
 projects it is a chat, named `chat'.  `lispm-holon-template' says what
-it is made from."
-  (lispm-holon--ensure-daemon)
-  (let* ((project (lispm-holon--project))
-         (id (lispm-holon--fresh-id (if project (file-name-nondirectory project) "chat"))))
+it is made from.  A project new to Holon's daemon in the sandbox starts
+it again first, so that it may write there."
+  (let ((project (lispm-holon--project)))
+    (when (and project
+               (lispm-holon--remember-workspaces (list project))
+               (lispm-holon--managed-p)
+               (lispm-service-process 'holon)
+               (not (eq (lispm-service-level 'holon) 'none)))
+      (message "Holon's daemon starts again, so that it may write %s" (abbreviate-file-name project))
+      (lispm-service-restart 'holon))
+    (lispm-holon--ensure-daemon)
+    (lispm-holon--new-agent project)))
+
+(defun lispm-holon--new-agent (project)
+  "Make a Holon agent for PROJECT, or a chat when it is nil, and return
+\(ID . ARGUMENTS) opening Holon's terminal UI on it."
+  (let* ((id (lispm-holon--fresh-id (if project (file-name-nondirectory project) "chat"))))
     (apply #'lispm-holon--run "agent" "create" id
            (and lispm-holon-template (list "--template" lispm-holon-template)))
     (when project
@@ -527,6 +605,100 @@ it is made from."
   (lispm-holon--ensure-daemon)
   (lispm-holon--select id)
   (list "tui"))
+
+;;;; In the sandbox
+
+(defun lispm-holon--workspaces-file ()
+  "Return the file listing the projects Holon's daemon may write in the
+sandbox.  It lies where Emacs keeps its own files, which sandboxed
+programs may never write."
+  (expand-file-name (locate-user-emacs-file "lispm-holon-workspaces.eld")))
+
+(defun lispm-holon--workspaces ()
+  "Return the projects LispM attached to Holon's agents, which Holon's
+daemon may write in the sandbox."
+  (let ((file (lispm-holon--workspaces-file)))
+    (when (file-readable-p file)
+      (ignore-errors
+        (with-temp-buffer
+          (insert-file-contents file)
+          (seq-filter #'stringp (read (current-buffer))))))))
+
+(defun lispm-holon--remember-workspaces (directories)
+  "Add DIRECTORIES to the projects Holon's daemon may write in the
+sandbox; return those it lacked."
+  (let* ((known (lispm-holon--workspaces))
+         (new (seq-uniq (seq-remove (lambda (directory) (member directory known))
+                                    (mapcar (lambda (directory)
+                                              (directory-file-name (expand-file-name directory)))
+                                            directories)))))
+    (when new
+      (let ((coding-system-for-write 'utf-8-unix)
+            (print-length nil)
+            (print-level nil))
+        (make-directory (file-name-directory (lispm-holon--workspaces-file)) t)
+        (write-region (concat ";; The projects Holon's daemon may write in the sandbox, see lispm-holon.el.\n"
+                              (prin1-to-string (append known new)) "\n")
+                      nil (lispm-holon--workspaces-file) nil 'silent)))
+    new))
+
+(defun lispm-holon--domains (providers)
+  "Return the domains of PROVIDERS, Holon's model providers as `holon
+config providers list' gives them, that have credentials.  Those on this
+machine are left out: the sandbox lets its programs reach this machine."
+  (seq-uniq
+   (mapcan (lambda (provider)
+             (when-let* (((plist-get provider :credential_configured))
+                         (host (ignore-errors (url-host (url-generic-parse-url
+                                                         (plist-get provider :base_url)))))
+                         ((not (member host '("" "localhost" "127.0.0.1" "::1" "[::1]")))))
+               (cons host
+                     ;; Signing in with ChatGPT renews its tokens there.
+                     (and (equal (plist-get provider :id) "openai-codex")
+                          (list "auth.openai.com")))))
+           providers)))
+
+(defun lispm-holon--sandbox-rules ()
+  "Return what Holon's daemon needs of the sandbox on top of its level's
+rules: to read and write Holon's home and the projects of
+`lispm-holon--workspaces' and `lispm-holon-sandbox-allow-write', to read
+its own program, to bind its socket and local port, and to reach its
+model providers and `lispm-holon-sandbox-domains'."
+  (let* ((home (directory-file-name (lispm-holon-home)))
+         (program (executable-find lispm-holon-program))
+         (projects (append (lispm-holon--workspaces)
+                           (mapcar (lambda (directory) (directory-file-name (expand-file-name directory)))
+                                   lispm-holon-sandbox-allow-write))))
+    (list :allow-read (append (list home)
+                              (and program (list (directory-file-name
+                                                  (file-name-directory (file-truename program)))))
+                              projects)
+          :allow-write (cons home projects)
+          :unix-sockets (list (lispm-holon--file "run/holon.sock"))
+          :local-binding t
+          :allowed-domains (append (lispm-holon--domains
+                                    (ignore-errors
+                                      (lispm-holon--json (lispm-holon--run "config" "providers" "list"))))
+                                   lispm-holon-sandbox-domains))))
+
+(defun lispm-holon--before-service ()
+  "Make way for Holon's daemon in the sandbox: Holon's own daemon, when it
+runs, is stopped, the projects of its agents first remembered as ones
+the daemon in the sandbox may write."
+  (when (lispm-holon--running-p)
+    (ignore-errors
+      (lispm-holon--remember-workspaces
+       (mapcan (lambda (entry)
+                 (mapcar (lambda (workspace) (plist-get workspace :workspace_anchor))
+                         (lispm-holon--project-workspaces
+                          (lispm-holon--ask "GET" (format "/api/agents/%s/state"
+                                                          (lispm-holon--entry-id entry))))))
+               (seq-filter #'lispm-holon--active-p (lispm-holon--ask "GET" "/api/agents/list")))))
+    (message "Stopping Holon's own daemon, for the one in the sandbox...")
+    (lispm-holon--run "daemon" "stop")
+    (let ((deadline (+ (float-time) lispm-holon-timeout)))
+      (while (and (lispm-holon--running-p) (< (float-time) deadline))
+        (sleep-for 0.1)))))
 
 (defun lispm-holon-setup ()
   "Set Holon up, in a terminal: `holon onboard' asks for a model provider,
@@ -563,9 +735,22 @@ its credentials and a default model.  Holon starts no agent before."
  :new-arguments #'lispm-holon--new-arguments
  :resume-arguments #'lispm-holon--resume-arguments)
 
+(when (fboundp 'lispm-define-service)
+  (lispm-define-service
+   'holon
+   :name "Holon"
+   :description "Holon's daemon, where its agents live and work."
+   :command (lambda () (list (or (executable-find lispm-holon-program) lispm-holon-program) "serve"))
+   :directory #'lispm-holon-home
+   :sandbox #'lispm-holon--sandbox-rules
+   :before-start #'lispm-holon--before-service))
+
 (defun lispm-holon-unload-function ()
-  "Take Holon away from the editor's agents, as this package is unloaded."
+  "Take Holon away from the editor's agents, and its daemon from the
+services, stopping it there, as this package is unloaded."
   (lispm-agents-undefine 'holon)
+  (when (fboundp 'lispm-undefine-service)
+    (lispm-undefine-service 'holon))
   ;; Unloading goes on as usual.
   nil)
 

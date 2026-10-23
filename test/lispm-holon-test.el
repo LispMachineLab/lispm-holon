@@ -77,9 +77,11 @@ See `lispm-holon-test--answer'."
 
 (defmacro lispm-holon-test-with-home (routes &rest body)
   "Run BODY with HOLON_HOME a fresh directory, its daemon answering ROUTES,
-see `lispm-holon-test--answer'; with ROUTES nil, no daemon runs."
+see `lispm-holon-test--answer'; with ROUTES nil, no daemon runs.  Emacs's
+own directory is a fresh one inside it."
   (declare (indent 1))
   `(let* ((home (make-temp-file "lh" t))
+          (user-emacs-directory (file-name-as-directory (expand-file-name "emacs" home)))
           (process-environment (cons (concat "HOLON_HOME=" home) process-environment))
           (lispm-holon--cache nil)
           (routes ,routes)
@@ -311,6 +313,18 @@ there are none."
         (should-not (lispm-holon-sessions)))
       (should (string-prefix-p (format-message "Holon sessions unavailable: Holon's daemon answered 404") said)))))
 
+(ert-deftest lispm-holon-test-stale-socket ()
+  "A socket a stopped daemon left behind is a daemon not running: no
+sessions, and nothing said."
+  (lispm-holon-test-with-home '(("GET /api/handshake" . (:ok t)))
+    (delete-process server)
+    (should (file-exists-p (lispm-holon--file "run/holon.sock")))
+    (should-not (lispm-holon--running-p))
+    (let ((said nil))
+      (cl-letf (((symbol-function 'message) (lambda (&rest args) (setq said args))))
+        (should-not (lispm-holon-sessions)))
+      (should-not said))))
+
 (ert-deftest lispm-holon-test-rename-and-delete ()
   "Renaming and deleting an agent go through Holon's command, and wait for
 the daemon's list to show it, which follows a moment after."
@@ -448,18 +462,137 @@ Holon itself sent left out."
           (delete-file file)))
       (should (equal (reverse asked) '((:message_ids ("m1")) (:brief_ids ("b1" "b2"))))))))
 
+;;;; In the sandbox
+
+(ert-deftest lispm-holon-test-service-defined ()
+  "Where LispM Agent has services, Holon's daemon is one: `holon serve' in
+Holon's home, with the rules it needs on top of a level's."
+  (skip-unless (featurep 'lispm-services))
+  (let ((props (alist-get 'holon lispm-services)))
+    (should (equal (plist-get props :name) "Holon"))
+    (should (equal (cdr (funcall (plist-get props :command))) '("serve")))
+    (should (eq (plist-get props :directory) #'lispm-holon-home))
+    (should (eq (plist-get props :sandbox) #'lispm-holon--sandbox-rules))))
+
+(ert-deftest lispm-holon-test-remember-workspaces ()
+  "The projects LispM attached are remembered, each once, where Emacs keeps
+its files."
+  (lispm-holon-test-with-home nil
+    (should-not (lispm-holon--workspaces))
+    (should (equal (lispm-holon--remember-workspaces '("/src/a/" "/src/b")) '("/src/a" "/src/b")))
+    (should-not (lispm-holon--remember-workspaces '("/src/a")))
+    (should (equal (lispm-holon--remember-workspaces '("/src/c" "/src/a")) '("/src/c")))
+    (should (equal (lispm-holon--workspaces) '("/src/a" "/src/b" "/src/c")))
+    (should (string-prefix-p (expand-file-name user-emacs-directory) (lispm-holon--workspaces-file)))))
+
+(ert-deftest lispm-holon-test-domains ()
+  "The domains Holon's daemon may reach are those of its model providers
+with credentials, ChatGPT's sign-in with its own; this machine needs none."
+  (should (equal (lispm-holon--domains
+                  '((:id "anthropic" :base_url "https://api.anthropic.com" :credential_configured t)
+                    (:id "openai" :base_url "https://api.openai.com/v1" :credential_configured nil)
+                    (:id "openai-codex" :base_url "https://chatgpt.com/backend-api/codex"
+                     :credential_configured t)
+                    (:id "ollama" :base_url "http://127.0.0.1:11434" :credential_configured t)
+                    (:id "litellm" :base_url "http://localhost:4000" :credential_configured t)
+                    (:id "proxy" :base_url "https://api.anthropic.com/v2" :credential_configured t)))
+                 '("api.anthropic.com" "chatgpt.com" "auth.openai.com"))))
+
+(ert-deftest lispm-holon-test-sandbox-rules ()
+  "In the sandbox, Holon's daemon may read and write Holon's home and the
+projects remembered or named, bind its socket and port, and reach its
+providers and the domains named."
+  (lispm-holon-test-with-home nil
+    (lispm-holon-test-with-program t
+      (with-temp-file (expand-file-name "providers.json" fake-directory)
+        (insert "[{\"id\": \"anthropic\", \"base_url\": \"https://api.anthropic.com\","
+                " \"credential_configured\": true}]"))
+      (lispm-holon--remember-workspaces '("/src/web"))
+      (let* ((lispm-holon-sandbox-allow-write '("/srv/shared/"))
+             (lispm-holon-sandbox-domains '("html.duckduckgo.com"))
+             (rules (lispm-holon--sandbox-rules))
+             (home (directory-file-name (lispm-holon-home))))
+        (should (equal (plist-get rules :allow-write) (list home "/src/web" "/srv/shared")))
+        (should (member "/src/web" (plist-get rules :allow-read)))
+        (should (member home (plist-get rules :allow-read)))
+        (should (equal (plist-get rules :unix-sockets) (list (lispm-holon--file "run/holon.sock"))))
+        (should (eq (plist-get rules :local-binding) t))
+        (should (equal (plist-get rules :allowed-domains) '("api.anthropic.com" "html.duckduckgo.com")))))))
+
+(ert-deftest lispm-holon-test-before-service ()
+  "Before Holon's daemon starts in the sandbox, Holon's own, running, is
+stopped, the projects of its agents remembered first."
+  (lispm-holon-test-with-home
+      `(("GET /api/handshake" . (:ok t))
+        ("GET /api/agents/list"
+         . ,(lambda (_) (cons 200 (vector (lispm-holon-test--entry "web")
+                                          (lispm-holon-test--entry "gone" nil "deleting")))))
+        ("GET /api/agents/web/state"
+         . ,(lispm-holon-test--state '(("agent_home:web" "/h/agents/web" t) ("ws_1" "/src/web" nil)
+                                      ("ws_2" "/src/docs" nil)))))
+    (lispm-holon-test-with-program t
+      (let ((lispm-holon-timeout 0.3)
+            (inhibit-message t))
+        (lispm-holon--before-service)
+        (should (equal (lispm-holon--workspaces) '("/src/web" "/src/docs")))
+        (should (equal (calls) '("daemon stop"))))))
+  (lispm-holon-test-with-home nil
+    (lispm-holon-test-with-program t
+      (lispm-holon--before-service)
+      (should-not (calls)))))
+
+(ert-deftest lispm-holon-test-daemon-in-the-sandbox ()
+  "When LispM runs Holon's daemon, starting a session starts the service in
+the sandbox, not Holon's own daemon; a project new to it starts it again
+first, so that it may write there, and one it knows does not."
+  (let ((started 0)
+        (restarted 0)
+        (running nil))
+    (cl-letf (((symbol-function 'lispm-service-managed-p) (lambda (id) (eq id 'holon)))
+              ((symbol-function 'lispm-service-process) (lambda (_) running))
+              ((symbol-function 'lispm-service-level) (lambda (_) 'low))
+              ((symbol-function 'lispm-service-start)
+               (lambda (_ &optional _show) (setq started (1+ started) running t)))
+              ((symbol-function 'lispm-service-restart)
+               (lambda (_ &optional _show) (setq restarted (1+ restarted))))
+              ((symbol-function 'lispm-service-buffer-name) (lambda (_) "*Service: Holon*")))
+      (lispm-holon-test-with-home
+          `(("GET /api/handshake" . (:ok t))
+            ("GET /api/agents/list" . ,(lambda (_) (cons 200 (vector)))))
+        (lispm-holon-test-with-program t
+          (let ((project "/src/web"))
+            (cl-letf (((symbol-function 'lispm-holon--project) (lambda () project)))
+              ;; Not running yet: started, the project remembered first.
+              (should (equal (lispm-holon--new-arguments) '("web" "tui")))
+              (should (= started 1))
+              (should (= restarted 0))
+              (should (equal (lispm-holon--workspaces) '("/src/web")))
+              ;; Running: a new project starts it again, a known one does not.
+              (setq project "/src/docs")
+              (lispm-holon--new-arguments)
+              (should (= restarted 1))
+              (lispm-holon--new-arguments)
+              (should (= restarted 1))
+              (should (= started 1))
+              (should-not (member "daemon start" (calls))))))))))
+
 ;;;; Unloading
 
 (ert-deftest lispm-holon-test-unloading-takes-it-away ()
   "Unloading the package, as the App Store does removing it, takes Holon
-away from the agents; loading it again brings it back."
+away from the agents, and its daemon from the services; loading it again
+brings them back."
   (unwind-protect
       (progn
         (unload-feature 'lispm-holon t)
         (should-not (assq 'holon lispm-agents-defined))
-        (should-not (keymap-lookup lispm-agents-map "o")))
+        (should-not (keymap-lookup lispm-agents-map "o"))
+        (when (featurep 'lispm-services)
+          (should-not (assq 'holon lispm-services))))
     (require 'lispm-holon))
-  (should (assq 'holon lispm-agents-defined)))
+  (should (assq 'holon lispm-agents-defined))
+  (when (featurep 'lispm-services)
+    (should (assq 'holon lispm-services))))
 
 (provide 'lispm-holon-test)
 ;;; lispm-holon-test.el ends here
