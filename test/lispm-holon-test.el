@@ -145,7 +145,9 @@ command is on PATH, started with o."
     (should (equal (plist-get props :key) "o"))
     (should (= (string-width (plist-get props :text-icon)) 1))
     (should-not (plist-get props :built-in))
-    (should-not (plist-get props :context))
+    (should (eq (plist-get props :context) #'lispm-holon--context))
+    (should (eq (plist-get props :deliver) #'lispm-holon--deliver))
+    (should (eq (plist-get props :ready) #'lispm-holon--ready-p))
     (should (file-readable-p (nth 1 (plist-get props :icon)))))
   (cl-letf (((symbol-function 'executable-find) #'ignore))
     (should-not (lispm-agents-available-p 'holon)))
@@ -575,6 +577,70 @@ first, so that it may write there, and one it knows does not."
               (should (= restarted 1))
               (should (= started 1))
               (should-not (member "daemon start" (calls))))))))))
+
+;;;; Other agents' messages, and LispM's tools
+
+(ert-deftest lispm-holon-test-messages ()
+  "What other agents send a Holon agent goes to Holon's daemon as its
+operator's message; the agent waits for input while it rests."
+  (let* ((prompted nil)
+         (status "asleep"))
+    (lispm-holon-test-with-home
+        `(("POST /api/control/agents/web%2B1/prompt"
+           . ,(lambda (json) (push json prompted) (cons 200 '(:ok t))))
+          ("GET /api/agents/web%2B1/state"
+           . ,(lambda (_) (cons 200 (list :agent (list :agent (list :status status)))))))
+      (let ((terminal (generate-new-buffer "*holon:test*")))
+        (unwind-protect
+            (progn
+              (with-current-buffer terminal (setq lispm-agents-buffer-session-id "web+1"))
+              (should (eq (lispm-holon--deliver terminal "[Message from codex]\nHi.") t))
+              (should (equal prompted '((:text "[Message from codex]\nHi."))))
+              (should (lispm-holon--ready-p terminal))
+              (setq status "awake_running")
+              (should-not (lispm-holon--ready-p terminal))
+              (setq status "awake_idle")
+              (should (lispm-holon--ready-p terminal)))
+          (kill-buffer terminal))))))
+
+(ert-deftest lispm-holon-test-tools-for-an-agent ()
+  "While LispM runs, a Holon agent open in a terminal has a server of its
+own, named to bin/lispm-tool by its HOLON_AGENT_ID, and the skill lispm
+saying how to reach it; both go with the server."
+  (skip-unless (fboundp 'lispm-agents-mcp-announce))
+  (lispm-holon-test-with-home nil
+    (let ((lispm-agents-mcp-peer-directory (expand-file-name "peers/" home))
+          (lispm-holon--served nil))
+      (cl-letf (((symbol-function 'lispm-holon--messaging-p) #'ignore))
+        (should-not (lispm-holon--context home "web")))
+      (cl-letf (((symbol-function 'lispm-holon--messaging-p) #'always))
+        (should-not (lispm-holon--context home))
+        (let* ((server (lispm-holon--context home "web"))
+               (peer (expand-file-name "HOLON_AGENT_ID=web" lispm-agents-mcp-peer-directory))
+               (skill (lispm-holon--file "agents/web/skills/lispm/SKILL.md")))
+          (should (lispm-holon-mcp-p server))
+          (should (file-exists-p peer))
+          (should (string-prefix-p "---\nname: lispm\ndescription: Talk with the other agents in LispM"
+                                   (with-temp-buffer (insert-file-contents skill) (buffer-string))))
+          (should (string-search (format "`%s NAME 'INPUT'`" lispm-agents-mcp-tool-program)
+                                 (with-temp-buffer (insert-file-contents skill) (buffer-string))))
+          (lispm-agents-context-stop server)
+          (should-not (file-exists-p peer))
+          (should-not (file-exists-p (file-name-directory skill)))
+          (should-not lispm-holon--served))))))
+
+(ert-deftest lispm-holon-test-sandbox-reads-lispm-tool ()
+  "In the sandbox, Holon's agents may read bin/lispm-tool and the files
+naming servers to it."
+  (skip-unless (boundp 'lispm-agents-mcp-tool-program))
+  (lispm-holon-test-with-home nil
+    (lispm-holon-test-with-program t
+      (let ((rules (lispm-holon--sandbox-rules)))
+        (should (member (directory-file-name (expand-file-name lispm-agents-mcp-peer-directory))
+                        (plist-get rules :allow-read)))
+        (should (member (directory-file-name
+                         (file-name-directory (file-truename lispm-agents-mcp-tool-program)))
+                        (plist-get rules :allow-read)))))))
 
 ;;;; Unloading
 

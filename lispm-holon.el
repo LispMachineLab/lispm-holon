@@ -57,7 +57,21 @@
 ;;   its conversation, what it was asked and the briefs it gave back, in
 ;;   Markdown.
 ;;
-;; Holon takes no MCP servers, so it sees nothing of Emacs's state.
+;; Holon takes no MCP servers.  While LispM runs, its agents still talk
+;; with the other agents, LispM's and other programs' such as Claude Code,
+;; and use LispM's skills and tools (lispm-agents-bridge.el):
+;;
+;; - What another agent sends a Holon agent goes to Holon's daemon, as a
+;;   message from its operator: an agent at work takes it into the turn
+;;   under way, one at rest starts a turn on it.  Holon's terminal UI
+;;   shows it as it comes.
+;; - A Holon agent open in a terminal has a server of its own there,
+;;   which it reaches with LispM Agent's command bin/lispm-tool, run in
+;;   its shell: the command finds the server by HOLON_AGENT_ID, which
+;;   Holon gives every command of the agent's.  A skill, lispm, written
+;;   into the agent's own skills while the terminal is open, says how.
+;;
+;; Holon sees nothing else of Emacs's state.
 ;;
 ;; Holon runs its agents' commands as you, with nothing confining them.
 ;; Where LispM Agent has services (lispm-services.el), Holon's daemon is
@@ -83,8 +97,14 @@
 (require 'url-util)
 (require 'url-parse)
 (require 'lispm-agents)
+(require 'lispm-agents-mcp)
 ;; LispM Agent's services, where it has them: since lispm-agent 0.7.0.
 (require 'lispm-services nil t)
+
+;; Since lispm-agent 0.8.0: servers named to bin/lispm-tool.
+(declare-function lispm-agents-mcp-announce "lispm-agents-mcp" (server variable value))
+(defvar lispm-agents-mcp-tool-program)
+(defvar lispm-agents-mcp-peer-directory)
 
 (declare-function lispm-define-service "lispm-services" (id &rest properties))
 (declare-function lispm-undefine-service "lispm-services" (id))
@@ -606,6 +626,116 @@ it again first, so that it may write there."
   (lispm-holon--select id)
   (list "tui"))
 
+;;;; Other agents' messages, and LispM's tools
+
+(cl-defstruct (lispm-holon-mcp (:include lispm-agents-mcp)
+                               (:constructor lispm-holon-mcp--make))
+  "The server of a Holon terminal, which its agent reaches with
+bin/lispm-tool.")
+
+(defvar lispm-holon--served nil
+  "The agents of live servers of Holon terminals, as (SERVER . ID).")
+
+(defun lispm-holon--messaging-p ()
+  "Return non-nil when LispM serves the editor's agents its tools and
+messages, and LispM Agent can name a server to bin/lispm-tool."
+  (and (featurep 'lispm-agents-bridge) (fboundp 'lispm-agents-mcp-announce)))
+
+(defun lispm-holon--skill-file (id)
+  "Return the file of the skill lispm among the agent ID's own skills."
+  (lispm-holon--file (format "agents/%s/skills/lispm/SKILL.md" id)))
+
+(defun lispm-holon--skill ()
+  "Return the skill telling a Holon agent how to work with LispM, as Holon
+reads skills: a SKILL.md."
+  (let ((tool lispm-agents-mcp-tool-program))
+    (concat
+     "---\nname: lispm\n"
+     "description: Talk with the other agents in LispM, as Claude Code, Codex and LispM's own, "
+     "and use LispM's skills and tools, with the lispm-tool command.\n---\n\n"
+     "# LispM\n\n"
+     "You run in LispM, beside other agents: LispM's own, and those of other programs, such as "
+     "Claude Code and Codex. What they send comes to you as your operator's message: "
+     "[Message from NAME]; [Request ID from NAME], which NAME waits for you to answer with "
+     "reply; [Reply from NAME to request ID].\n\n"
+     "Reach them, and LispM's skills and tools, by running this command with ExecCommand:\n\n"
+     (format "- `%s` says who you are among the agents, and lists the tools with their inputs.\n" tool)
+     (format "- `%s NAME 'INPUT'` calls the tool NAME on INPUT, a JSON object; with `-` in place "
+             tool)
+     "of INPUT it reads the input from standard input, best for long texts.\n\n"
+     "The tools:\n\n"
+     "- list_agents `{}`: who is here, and whether each is busy.\n"
+     "- send_message `{\"to\": NAME, \"text\": TEXT}`: tell another agent something.\n"
+     "- ask_agent `{\"agent\": NAME, \"request\": TEXT}`: ask another agent for something; its "
+     "reply comes to you later as a message. Naming a role starts a LispM helper of that role.\n"
+     "- reply `{\"request\": ID, \"text\": TEXT}`: answer a request sent to you.\n"
+     "- search_tools `{\"query\": WORDS}`, skill `{\"name\": NAME}` and call_tool "
+     "`{\"name\": NAME, \"input\": {...}}`: find, load and use LispM's skills and tools. A call "
+     "that changes things waits for the user's approval in LispM, which may take a while.\n\n"
+     "Messages and requests are self-contained: the others cannot see your conversation. "
+     "Name places as [[file:PATH::LINE]]. The command exits with 1 when the tool failed, its "
+     "output saying why, and with 2 when LispM cannot be reached from here.\n")))
+
+(defun lispm-holon--write-skill (id)
+  "Give the agent ID the skill lispm, unless it has it as it is."
+  (let ((file (lispm-holon--skill-file id))
+        (text (lispm-holon--skill)))
+    (unless (and (file-readable-p file)
+                 (equal text (with-temp-buffer
+                               (insert-file-contents file)
+                               (buffer-string))))
+      (make-directory (file-name-directory file) t)
+      (let ((coding-system-for-write 'utf-8-unix))
+        (write-region text nil file nil 'silent)))))
+
+(defun lispm-holon--context (directory &optional id)
+  "Serve LispM's tools to the Holon agent ID, opened in a terminal in
+DIRECTORY, while LispM runs: a server it reaches with bin/lispm-tool by
+its HOLON_AGENT_ID, and the skill lispm saying how."
+  (when (and id (lispm-holon--messaging-p))
+    (let ((server (lispm-agents-mcp-start "holon-mcp" #'lispm-holon-mcp--make directory)))
+      (condition-case err
+          (progn (lispm-agents-mcp-announce server "HOLON_AGENT_ID" id)
+                 (lispm-holon--write-skill id))
+        (error (lispm-agents-context-stop server)
+               (signal (car err) (cdr err))))
+      (push (cons server id) lispm-holon--served)
+      server)))
+
+(cl-defmethod lispm-agents-context-stop ((server lispm-holon-mcp))
+  "Stop SERVER, and take the skill lispm from its agent, which LispM no
+longer serves."
+  (when-let* ((entry (assq server lispm-holon--served)))
+    (setq lispm-holon--served (delq entry lispm-holon--served))
+    (unless (rassoc (cdr entry) lispm-holon--served)
+      (ignore-errors
+        (delete-directory (file-name-directory (lispm-holon--skill-file (cdr entry))) t))))
+  (cl-call-next-method))
+
+(defun lispm-holon--terminal-id (terminal)
+  "Return the id of the Holon agent of TERMINAL; an error if unknown."
+  (or (lispm-agents-terminal-session-id terminal)
+      (error "%s runs no Holon agent known yet" (buffer-name terminal))))
+
+(defun lispm-holon--deliver (terminal text)
+  "Give the Holon agent of TERMINAL TEXT as a message from its operator.
+Holon's daemon takes it at once: an agent at work into the turn under
+way, one at rest in a turn of its own.  Return t."
+  (lispm-holon--ask "POST" (format "/api/control/agents/%s/prompt"
+                                   (url-hexify-string (lispm-holon--terminal-id terminal)))
+                    (list :text text))
+  t)
+
+(defconst lispm-holon-resting '("asleep" "awake_idle")
+  "The statuses of a Holon agent that waits for input.")
+
+(defun lispm-holon--ready-p (terminal)
+  "Return non-nil when the Holon agent of TERMINAL waits for input."
+  (when-let* ((id (lispm-agents-terminal-session-id terminal))
+              (state (ignore-errors
+                       (lispm-holon--ask "GET" (format "/api/agents/%s/state" (url-hexify-string id))))))
+    (member (plist-get (plist-get (plist-get state :agent) :agent) :status) lispm-holon-resting)))
+
 ;;;; In the sandbox
 
 (defun lispm-holon--workspaces-file ()
@@ -662,16 +792,22 @@ machine are left out: the sandbox lets its programs reach this machine."
   "Return what Holon's daemon needs of the sandbox on top of its level's
 rules: to read and write Holon's home and the projects of
 `lispm-holon--workspaces' and `lispm-holon-sandbox-allow-write', to read
-its own program, to bind its socket and local port, and to reach its
-model providers and `lispm-holon-sandbox-domains'."
+its own program, and bin/lispm-tool and the files naming servers to it,
+to bind its socket and local port, and to reach its model providers and
+`lispm-holon-sandbox-domains'."
   (let* ((home (directory-file-name (lispm-holon-home)))
          (program (executable-find lispm-holon-program))
          (projects (append (lispm-holon--workspaces)
                            (mapcar (lambda (directory) (directory-file-name (expand-file-name directory)))
-                                   lispm-holon-sandbox-allow-write))))
+                                   lispm-holon-sandbox-allow-write)))
+         (lispm (and (boundp 'lispm-agents-mcp-tool-program)
+                     (list (directory-file-name
+                            (file-name-directory (file-truename lispm-agents-mcp-tool-program)))
+                           (directory-file-name (expand-file-name lispm-agents-mcp-peer-directory))))))
     (list :allow-read (append (list home)
                               (and program (list (directory-file-name
                                                   (file-name-directory (file-truename program)))))
+                              lispm
                               projects)
           :allow-write (cons home projects)
           :unix-sockets (list (lispm-holon--file "run/holon.sock"))
@@ -733,7 +869,10 @@ its credentials and a default model.  Holon starts no agent before."
  ;; An agent's id is a name a person reads.
  :short-id #'identity
  :new-arguments #'lispm-holon--new-arguments
- :resume-arguments #'lispm-holon--resume-arguments)
+ :resume-arguments #'lispm-holon--resume-arguments
+ :context #'lispm-holon--context
+ :deliver #'lispm-holon--deliver
+ :ready #'lispm-holon--ready-p)
 
 (when (fboundp 'lispm-define-service)
   (lispm-define-service
