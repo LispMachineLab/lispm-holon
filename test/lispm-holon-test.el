@@ -660,5 +660,14 @@ brings them back."
   (when (featurep 'lispm-services)
     (should (assq 'holon lispm-services))))
 
+(ert-deftest lispm-holon-test-knows-no-desktop ()
+  "Holon's extension stands alone beside lispm-agent: none of its files
+but the tests names LispM Desktop's code."
+  (dolist (file (directory-files (file-name-directory (locate-library "lispm-holon")) t "\\.el\\'"))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (should-not (and (re-search-forward "lispm-desktop\\|platinum" nil t)
+                       (format "%s:%d" (file-name-nondirectory file) (line-number-at-pos)))))))
+
 (provide 'lispm-holon-test)
 ;;; lispm-holon-test.el ends here

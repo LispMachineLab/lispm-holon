@@ -35,6 +35,12 @@
 ;; `holon' is on PATH: o in `lispm-agents-map' starts it in the current
 ;; project, and its agents join the sessions of the others.
 ;;
+;; It needs lispm-agent 0.8.0 or later (the package `lispm'), which LispM
+;; Desktop loads before it.  Package-Requires leaves it out on purpose:
+;; package.el would not activate this package where lispm-agent is a
+;; checkout on the load path rather than a package, or a package of an
+;; older version, and it could not be loaded at all.
+;;
 ;; Holon keeps agents rather than sessions: each lives in Holon's daemon,
 ;; with a role, a memory and work it follows through, and goes on with
 ;; one conversation however often it is left and taken up again.  Here,
